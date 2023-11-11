@@ -1,0 +1,10 @@
+---
+triple:          'arm64-apple-darwin'
+binary-path:     waitForPorts
+relocations:
+  - { offsetInCU: 0x26, offset: 0x26, size: 0x8, addend: 0x0, symName: _getDefaultPort, symObjAddr: 0x0, symBinAddr: 0x100003C0C, symSize: 0xB8 }
+  - { offsetInCU: 0x80, offset: 0x80, size: 0x8, addend: 0x0, symName: _getDefaultPort, symObjAddr: 0x0, symBinAddr: 0x100003C0C, symSize: 0xB8 }
+  - { offsetInCU: 0xB6, offset: 0xB6, size: 0x8, addend: 0x0, symName: _main, symObjAddr: 0xB8, symBinAddr: 0x100003CC4, symSize: 0xCC }
+  - { offsetInCU: 0x124, offset: 0x124, size: 0x8, addend: 0x0, symName: _openUdpPort, symObjAddr: 0x184, symBinAddr: 0x100003D90, symSize: 0x118 }
+  - { offsetInCU: 0x168, offset: 0x168, size: 0x8, addend: 0x0, symName: __OSSwapInt16, symObjAddr: 0x29C, symBinAddr: 0x100003EA8, symSize: 0x24 }
+...
