@@ -29,6 +29,7 @@
 #define STCP_SUCCESS 1
 #define STCP_ERROR -1
 #define STCP_SYN_SENT 0x6
+#define STCP_FIN_WAIT 0x7
 
 typedef struct {
     int state;
@@ -37,7 +38,7 @@ typedef struct {
     unsigned int ack;
     unsigned short rwnd;
     unsigned short swnd; 
-
+    int num_segments; 
 } stcp_send_ctrl_blk;
 
 typedef struct {
@@ -62,103 +63,45 @@ typedef struct {
  */
 int stcp_send(stcp_send_ctrl_blk *stcp_CB, unsigned char* data, int length) {
     
-    // size_t len = sizeof(data); 
-    // unsigned char buff[STCP_MSS];
-    // int num_segments; 
-
-    // linked_list *head = NULL;
-    // linked_list *tail = NULL;
-
-    // // Initializes a linked list to store the data segments
-    // for (int offset = 0; offset < len; offset += STCP_MSS) {
-       
-    //    size_t current_segment_size = (len - offset < STCP_MSS) ? len - offset : STCP_MSS;
-    //    strncpy(buff, data, current_segment_size);
-    //    packet *pkt = (packet*) malloc(sizeof(packet));
-    //    createSegment(&pkt, 0, STCP_MAXWIN, 0, 0, buff, current_segment_size); // initialize with correct fields
-
-    //    if (!head) {
-    //     head = (linked_list*) malloc(sizeof(linked_list));
-    //     head->pkt = pkt; 
-    //     head->next = NULL;
-
-    //     tail = (linked_list*) malloc(sizeof(linked_list));
-    //     tail = head;
-    //     num_segments = 1;
-
-    //    } else {
-
-    //     // unsure if this fails when head is the only node in linked list 
-    //     linked_list *temp = (linked_list*) malloc(sizeof(linked_list));
-        
-    //     tail->next = temp;
-    //     tail = tail->next; 
-    //     num_segments++;
-       
-    //    }
-    // }
-
     // stcp_send_ctrl_blk *cb = stcp_CB;
     // int fd = stcp_CB->fd;
     // int swnd = stcp_CB->swnd;
     // int rwnd = stcp_CB->rwnd;
 
+    // size_t len = sizeof(data); 
+    // unsigned char buff[STCP_MSS];
+
+    // linked_list *head = NULL;
+    // linked_list *tail = NULL;
+
     // int timeout = STCP_INITIAL_TIMEOUT;
 
-    // while (num_segments > 0) {
+    // while (len > 0) {
 
-    //     packet *pkt = tail->pkt;
-    //     tcpheader *hdr = tail->pkt->hdr;
-    //     int len = tail->pkt->len;
-    
     //     if (swnd < rwnd) {
 
-    //         // may need to initialize more things here
-    //         hdr->seqNo = cb->seq;
-    //         hdr->ackNo = cb->ack;
+    //         int current_segment_size = (len - offset < STCP_MTU) ? len - offset : STCP_MTU; 
+    //         strncpy(buff, data, current_segment_size); 
+    //         packet *pkt = (packet*) malloc(sizeof(packet)); 
+    //         createSegment(&pkt, 0, cb->rwnd, cb->seq, cb->ack, buff, current_segment_size);
 
-    //         htonHdr(hdr);
-    //         hdr->checksum = ipchecksum(pkt, len);
+    //         if (!head) {
+    //             head = (linked_list*) malloc(sizeof(linked_list)); 
+    //             head->pkt = pkt; 
+    //             head->next = NULL; 
+    //             tail = head; 
+    //             num_segments = 1; 
+    //         } else {
+    //             linked_list* temp = (linked_list*) malloc(sizeof(linked_list)); 
+    //             tail->next = temp; 
+    //             tail = tail->next; 
+    //             num_segments++;
+    //         }
 
-    //         send(fd, pkt, len, 0);
-    //         ntohHdr(hdr);
-
-    //         swnd++;
+    //         htonHdr(pkt->hdr); 
+    //         pkt->hdr->checksum = ipchecksum(pkt, pkt->len);
+    //         ntohHdr(pkt->hdr); 
     //     }
-
-    //     unsigned char buff[STCP_MTU];
-    //     int recv = readWithTimeout(fd, buff, timeout);
-
-    //     if (recv == STCP_READ_TIMED_OUT) {
-            
-    //         timeout = stcpNextTimeout(timeout);
-    //         htonHdr(hdr);
-    //         send(fd, pkt, len, 0);
-    //         ntohHdr(hdr);
-    //         continue;
-
-    //     }
-
-    //     if (recv == STCP_READ_PERMANENT_FAILURE) return STCP_ERROR;
-
-    //     tcpheader *recv_hdr = (tcpheader *) buff;
-
-    //     if (ipchecksum(recv_hdr, recv) == 0 && getAck(recv_hdr)) {
-            
-    //         ntohHdr(recv_hdr);
-            
-    //         cb->seq = recv_hdr->ackNo; // -- initialize these fields properly
-    //         // cb->ack += recv - sizeof(tcpheader); unsure about this -- maybe use helper payloadSize() somehow?
-    //         cb->rwnd = hdr->windowSize;
-    //         cb->swnd--;
-    //         num_segments--;
-
-    //         linked_list *temp = head; 
-    //         head = head->next;
-    //         free(temp);
-    //         tail = tail->next;
-
-    //     } else continue;
     // }
 
     return STCP_SUCCESS;
@@ -198,8 +141,6 @@ stcp_send_ctrl_blk * stcp_open(char *destination, int sendersPort,
 
     createSegment(&pkt, SYN, STCP_MAXWIN, cb->seq, cb->ack, NULL, 0);
 
-    // dump('s', pkt.hdr, pkt.len);
-
     htonHdr(pkt.hdr);
     pkt.hdr->checksum = ipchecksum(pkt.hdr, pkt.len);
     send(fd, pkt.hdr, pkt.len, 0);
@@ -214,10 +155,8 @@ stcp_send_ctrl_blk * stcp_open(char *destination, int sendersPort,
         unsigned char buff[STCP_MTU];
 
         int len = readWithTimeout(fd, buff, timeout);
-        // timeout = stcpNextTimeout(timeout); moved below 
 
         if (len == STCP_READ_TIMED_OUT) {
-            // dump('s', pkt.hdr, pkt.len);
             timeout = stcpNextTimeout(timeout);
             htonHdr(pkt.hdr);
             send(fd, pkt.hdr, pkt.len, 0);
@@ -254,7 +193,6 @@ stcp_send_ctrl_blk * stcp_open(char *destination, int sendersPort,
  * Returns STCP_SUCCESS on success or STCP_ERROR on error.
  */
 int stcp_close(stcp_send_ctrl_blk *cb) {
-    /* YOUR CODE HERE */
     return STCP_SUCCESS;
 }
 /*
@@ -318,7 +256,7 @@ int main(int argc, char **argv) {
      */
     cb = stcp_open(destinationHost, sendersPort, receiversPort);
     if (cb == NULL) {
-        /* YOUR CODE HERE */
+        exit(1);
     }
 
     /* Start to send data in file via STCP to remote receiver. Chop up
