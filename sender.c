@@ -193,7 +193,52 @@ stcp_send_ctrl_blk * stcp_open(char *destination, int sendersPort,
  * Returns STCP_SUCCESS on success or STCP_ERROR on error.
  */
 int stcp_close(stcp_send_ctrl_blk *cb) {
-    return STCP_SUCCESS;
+    
+    int fd = cb->fd;
+    packet pkt; 
+    createSegment(&pkt, FIN, cb->rwnd, cb->seq, cb->ack, NULL, 0);
+
+    htonHdr(pkt.hdr); 
+    pkt.hdr->checksum = ipchecksum(pkt.hdr, pkt.len);
+    send(fd, pkt.hdr, pkt.len, 0);
+    ntohHdr(pkt.hdr);
+
+    cb->state = STCP_FIN_WAIT;
+
+    int timeout = STCP_INITIAL_TIMEOUT;
+
+    while (1) {
+
+        unsigned char buff[STCP_MTU];
+
+        int len = readWithTimeout(fd, buff, timeout); 
+
+        if (len == STCP_READ_TIMED_OUT) {
+            timeout = stcpNextTimeout(timeout);
+            htonHdr(pkt.hdr);
+            send(fd, pkt.hdr, pkt.len, 0);
+            ntohHdr(pkt.hdr);
+            continue; 
+        }
+
+        if (len == STCP_READ_PERMANENT_FAILURE) return STCP_ERROR;
+
+        tcpheader *hdr = (tcpheader*) buff; 
+
+        if (ipchecksum(hdr, len == 0) && getFin(hdr)) {
+            
+            packet finAck; 
+            createSegment(&finAck, ACK, cb->rwnd, cb->seq, cb->ack, NULL, 0);
+            
+            htonHdr(pkt.hdr);
+            send(fd, pkt.hdr, pkt.len, 0);
+
+            cb->state = STCP_CLOSED;
+            close(cb->fd);  
+            free(cb); 
+            return STCP_SUCCESS;
+        } else continue; 
+    }
 }
 /*
  * Return a port number based on the uid of the caller.  This will
@@ -271,13 +316,18 @@ int main(int argc, char **argv) {
             break;
 
         if (stcp_send(cb, buffer, num_read_bytes) == STCP_ERROR) {
-            /* YOUR CODE HERE */
+            // possibly free linked list / malloc'd memory here 
+            close(cb->fd); 
+            free(cb);
+            exit(1);
         }
     }
 
     /* Close the connection to remote receiver */
     if (stcp_close(cb) == STCP_ERROR) {
-        /* YOUR CODE HERE */
+        close(cb->fd); 
+        free(cb); 
+        exit(1); 
     }
 
     return 0;
