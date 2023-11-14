@@ -29,22 +29,25 @@
 #define STCP_SUCCESS 1
 #define STCP_ERROR -1
 #define STCP_SYN_SENT 0x6
-#define STCP_FIN_WAIT 0x7
+
+typedef struct {
+    packet pkt; 
+    struct node *next; 
+} node; 
 
 typedef struct {
     int state;
     int fd;
     unsigned int seq;
     unsigned int ack;
+    unsigned int lastAck;
     unsigned short rwnd;
-    unsigned short swnd; 
-    int num_segments; 
+    unsigned short swnd;
+    node *head;
+    node *tail;
 } stcp_send_ctrl_blk;
 
-typedef struct {
-    packet *pkt; 
-    struct linked_list *next; 
-} linked_list; 
+/* ADD ANY EXTRA FUNCTIONS HERE */
 
 /*
  * Send STCP. This routine is to send all the data (len bytes).  If more
@@ -62,47 +65,96 @@ typedef struct {
  * The function returns STCP_SUCCESS on success, or STCP_ERROR on error.
  */
 int stcp_send(stcp_send_ctrl_blk *stcp_CB, unsigned char* data, int length) {
-    
-    // stcp_send_ctrl_blk *cb = stcp_CB;
-    // int fd = stcp_CB->fd;
-    // int swnd = stcp_CB->swnd;
-    // int rwnd = stcp_CB->rwnd;
 
-    // size_t len = sizeof(data); 
-    // unsigned char buff[STCP_MSS];
+    /* YOUR CODE HERE */
+    int timeout = STCP_INITIAL_TIMEOUT;
+    int repeat = 0;
 
-    // linked_list *head = NULL;
-    // linked_list *tail = NULL;
+    while (stcp_CB->swnd + length + 20 >= stcp_CB->rwnd) {
 
-    // int timeout = STCP_INITIAL_TIMEOUT;
+        unsigned char buff[STCP_MTU];
+        packet *pkt = &stcp_CB->head->pkt;
 
-    // while (len > 0) {
+        int len = readWithTimeout(stcp_CB->fd, buff, timeout);
 
-    //     if (swnd < rwnd) {
+        if (len == STCP_READ_TIMED_OUT) {
+            timeout = stcpNextTimeout(timeout);
+            htonHdr(pkt->hdr);
+            send(stcp_CB->fd, pkt, pkt->len, 0);
+            ntohHdr(pkt->hdr);
+            continue;
+        }
 
-    //         int current_segment_size = (len - offset < STCP_MTU) ? len - offset : STCP_MTU; 
-    //         strncpy(buff, data, current_segment_size); 
-    //         packet *pkt = (packet*) malloc(sizeof(packet)); 
-    //         createSegment(&pkt, 0, cb->rwnd, cb->seq, cb->ack, buff, current_segment_size);
+        if (len == STCP_READ_PERMANENT_FAILURE) return STCP_ERROR;
 
-    //         if (!head) {
-    //             head = (linked_list*) malloc(sizeof(linked_list)); 
-    //             head->pkt = pkt; 
-    //             head->next = NULL; 
-    //             tail = head; 
-    //             num_segments = 1; 
-    //         } else {
-    //             linked_list* temp = (linked_list*) malloc(sizeof(linked_list)); 
-    //             tail->next = temp; 
-    //             tail = tail->next; 
-    //             num_segments++;
-    //         }
+        tcpheader *hdr = (tcpheader *) buff;
 
-    //         htonHdr(pkt->hdr); 
-    //         pkt->hdr->checksum = ipchecksum(pkt, pkt->len);
-    //         ntohHdr(pkt->hdr); 
-    //     }
-    // }
+        if (ipchecksum(hdr, len) != 0 ) continue;
+        if (getAck(hdr) == 0) continue;
+        if (getRst(hdr)) return STCP_ERROR;
+
+        ntohHdr(hdr);
+        
+        // if the receiver tries to ACK a packet that has not yet been sent 
+        if (stcp_CB->ack + stcp_CB->tail->pkt.len < hdr->seqNo) {
+            packet rset;
+            createSegment(&rset, RST, stcp_CB->rwnd, stcp_CB->seq, stcp_CB->ack, NULL, 0);
+            htonHdr(rset.hdr);
+            rset.hdr->checksum = ipchecksum(&rset, rset.len);
+            send(stcp_CB->fd, &rset, rset.len, 0);
+            return STCP_ERROR;
+        };
+
+        if (stcp_CB->ack != hdr->seqNo) continue;
+
+        stcp_CB->rwnd = hdr->windowSize;
+
+        if (hdr->ackNo == stcp_CB->lastAck) repeat++;
+        else {
+            stcp_CB->lastAck = hdr->ackNo;
+            repeat = 0;
+        }
+
+        if (repeat == 3) {
+            while (readWithTimeout(stcp_CB->fd, buff, timeout) > 0);
+            timeout = stcpNextTimeout(timeout);
+            htonHdr(pkt->hdr);
+            send(stcp_CB->fd, pkt, pkt->len, 0);
+            ntohHdr(pkt->hdr);
+            continue;
+        }
+
+        while (greater32(hdr->ackNo, pkt->hdr->seqNo)) {
+            node *temp = stcp_CB->head;
+            stcp_CB->head = temp->next;
+            stcp_CB->swnd -= pkt->len;
+            free(temp);
+            pkt = &stcp_CB->head->pkt;
+        }
+    }
+
+    if (stcp_CB->head == NULL) {
+        stcp_CB->head = malloc(sizeof(node));
+        stcp_CB->tail = stcp_CB->head;
+    } else {
+        node *temp = malloc(sizeof(node));
+        stcp_CB->tail->next = temp;
+        stcp_CB->tail = temp;
+    }
+
+    packet *pkt_ptr = &stcp_CB->tail->pkt;
+
+    createSegment(pkt_ptr, ACK, STCP_MAXWIN, stcp_CB->seq, stcp_CB->ack, NULL, 0);
+
+    memcpy(&pkt_ptr->data[sizeof(tcpheader)], data, length);
+    pkt_ptr->len += length;
+
+    htonHdr(pkt_ptr->hdr);
+    pkt_ptr->hdr->checksum = ipchecksum(pkt_ptr, pkt_ptr->len);
+    send(stcp_CB->fd, pkt_ptr, pkt_ptr->len, 0);
+    ntohHdr(pkt_ptr->hdr);
+    stcp_CB->swnd += pkt_ptr->len;
+    stcp_CB->seq = plus32(stcp_CB->seq, length);
 
     return STCP_SUCCESS;
 }
@@ -133,17 +185,17 @@ stcp_send_ctrl_blk * stcp_open(char *destination, int sendersPort,
 
     if (fd < 0) return NULL;
 
-    stcp_send_ctrl_blk *cb = malloc(sizeof cb);
+    stcp_send_ctrl_blk *cb = malloc(sizeof(stcp_send_ctrl_blk));
     packet pkt;
 
-    cb->seq = (unsigned int) rand();
+    cb->seq = (unsigned int) 0;
     cb->ack = (unsigned int) rand();
 
     createSegment(&pkt, SYN, STCP_MAXWIN, cb->seq, cb->ack, NULL, 0);
 
     htonHdr(pkt.hdr);
-    pkt.hdr->checksum = ipchecksum(pkt.hdr, pkt.len);
-    send(fd, pkt.hdr, pkt.len, 0);
+    pkt.hdr->checksum = ipchecksum(&pkt, pkt.len);
+    send(fd, &pkt, pkt.len, 0);
     ntohHdr(pkt.hdr);
 
     cb->state = STCP_SYN_SENT;
@@ -159,7 +211,7 @@ stcp_send_ctrl_blk * stcp_open(char *destination, int sendersPort,
         if (len == STCP_READ_TIMED_OUT) {
             timeout = stcpNextTimeout(timeout);
             htonHdr(pkt.hdr);
-            send(fd, pkt.hdr, pkt.len, 0);
+            send(fd, &pkt, pkt.len, 0);
             ntohHdr(pkt.hdr);
             continue;
         }
@@ -167,15 +219,18 @@ stcp_send_ctrl_blk * stcp_open(char *destination, int sendersPort,
         if (len == STCP_READ_PERMANENT_FAILURE) return NULL;
 
         tcpheader *hdr = (tcpheader *) buff;
-        
+
+        if (getRst(hdr)) return NULL;
         if (ipchecksum(hdr, len) == 0 && getSyn(hdr)) {
             ntohHdr(hdr);
             cb->state = STCP_ESTABLISHED;
             cb->fd = fd;
-            cb->seq++;
-            cb->ack = hdr->seqNo + 1;
+            cb->seq = plus32(cb->seq, 1);
+            cb->ack = plus32(hdr->seqNo, 1);
             cb->rwnd = hdr->windowSize;
             cb->swnd = 0;
+            cb->head = NULL;
+            cb->tail = NULL;
         } else continue;
 
         return cb;
@@ -193,30 +248,84 @@ stcp_send_ctrl_blk * stcp_open(char *destination, int sendersPort,
  * Returns STCP_SUCCESS on success or STCP_ERROR on error.
  */
 int stcp_close(stcp_send_ctrl_blk *cb) {
+
+    int timeout = STCP_INITIAL_TIMEOUT;
+    int repeat = 0;
+
+    while (cb->swnd > 0) {
+
+        unsigned char buff[STCP_MTU];
+        packet *pkt = &cb->head->pkt;
+
+        int len = readWithTimeout(cb->fd, buff, timeout);
+
+        if (len == STCP_READ_TIMED_OUT) {
+            timeout = stcpNextTimeout(timeout);
+            htonHdr(pkt->hdr);
+            send(cb->fd, pkt, pkt->len, 0);
+            ntohHdr(pkt->hdr);
+            continue;
+        }
+
+        if (len == STCP_READ_PERMANENT_FAILURE) return STCP_ERROR;
+
+        tcpheader *hdr = (tcpheader *) buff;
+
+        if (ipchecksum(hdr, len) != 0 ) continue;
+        if (getAck(hdr) == 0) continue;
+        if (getRst(hdr)) return STCP_ERROR;
+
+        ntohHdr(hdr);
+        if (cb->ack != hdr->seqNo) continue;
+
+        if (hdr->ackNo == cb->lastAck) repeat++;
+        else {
+            cb->lastAck = hdr->ackNo;
+            repeat = 0;
+        }
+
+        if (repeat == 3) {
+            while (readWithTimeout(cb->fd, buff, timeout) > 0);
+            timeout = stcpNextTimeout(timeout);
+            htonHdr(pkt->hdr);
+            send(cb->fd, pkt, pkt->len, 0);
+            ntohHdr(pkt->hdr);
+            continue;
+        }
+
+        cb->rwnd = hdr->windowSize;
+
+        while (greater32(hdr->ackNo, pkt->hdr->seqNo) && cb->swnd) {
+            node *temp = cb->head;
+            cb->head = temp->next;
+            cb->swnd -= pkt->len;
+            free(temp);
+            if (cb->head == NULL) break;
+            pkt = &cb->head->pkt;
+        }
+    }
     
-    int fd = cb->fd;
     packet pkt; 
-    createSegment(&pkt, FIN, cb->rwnd, cb->seq, cb->ack, NULL, 0);
+    createSegment(&pkt, FIN | ACK, cb->rwnd, cb->seq, cb->ack, NULL, 0);
 
     htonHdr(pkt.hdr); 
     pkt.hdr->checksum = ipchecksum(pkt.hdr, pkt.len);
-    send(fd, pkt.hdr, pkt.len, 0);
+    send(cb->fd, pkt.hdr, pkt.len, 0);
     ntohHdr(pkt.hdr);
 
-    cb->state = STCP_FIN_WAIT;
-
-    int timeout = STCP_INITIAL_TIMEOUT;
+    cb->state = STCP_TIME_WAIT;
+    timeout = STCP_INITIAL_TIMEOUT;
 
     while (1) {
 
         unsigned char buff[STCP_MTU];
 
-        int len = readWithTimeout(fd, buff, timeout); 
+        int len = readWithTimeout(cb->fd, buff, timeout); 
 
         if (len == STCP_READ_TIMED_OUT) {
             timeout = stcpNextTimeout(timeout);
             htonHdr(pkt.hdr);
-            send(fd, pkt.hdr, pkt.len, 0);
+            send(cb->fd, pkt.hdr, pkt.len, 0);
             ntohHdr(pkt.hdr);
             continue; 
         }
@@ -228,15 +337,19 @@ int stcp_close(stcp_send_ctrl_blk *cb) {
         if (ipchecksum(hdr, len == 0) && getFin(hdr)) {
             
             packet finAck; 
-            createSegment(&finAck, ACK, cb->rwnd, cb->seq, cb->ack, NULL, 0);
-            
-            htonHdr(pkt.hdr);
-            send(fd, pkt.hdr, pkt.len, 0);
+            createSegment(&finAck, ACK | FIN, cb->rwnd, cb->seq, cb->ack, NULL, 0);
 
-            cb->state = STCP_CLOSED;
-            close(cb->fd);  
-            free(cb); 
-            return STCP_SUCCESS;
+            htonHdr(finAck.hdr);
+            finAck.hdr->checksum = ipchecksum(&finAck, finAck.len);
+            send(cb->fd, finAck.hdr, finAck.len, 0);
+            cb->state = cb->state == STCP_TIME_WAIT ? STCP_TIME_WAIT_2 : STCP_CLOSED;
+
+            if (cb->state == STCP_CLOSED) {
+                close(cb->fd);  
+                free(cb); 
+                return STCP_SUCCESS;
+            }
+
         } else continue; 
     }
 }
@@ -301,6 +414,7 @@ int main(int argc, char **argv) {
      */
     cb = stcp_open(destinationHost, sendersPort, receiversPort);
     if (cb == NULL) {
+        /* YOUR CODE HERE */
         exit(1);
     }
 
@@ -316,8 +430,14 @@ int main(int argc, char **argv) {
             break;
 
         if (stcp_send(cb, buffer, num_read_bytes) == STCP_ERROR) {
-            // possibly free linked list / malloc'd memory here 
-            close(cb->fd); 
+            /* YOUR CODE HERE */
+            cb->state = STCP_CLOSED;
+            while (cb->head) {
+                node* temp = cb->head; 
+                cb->head = cb->head->next; 
+                free(temp);
+            }
+            close(cb->fd);
             free(cb);
             exit(1);
         }
@@ -325,9 +445,16 @@ int main(int argc, char **argv) {
 
     /* Close the connection to remote receiver */
     if (stcp_close(cb) == STCP_ERROR) {
-        close(cb->fd); 
-        free(cb); 
-        exit(1); 
+        /* YOUR CODE HERE */
+        cb->state = STCP_CLOSED;
+        while (cb->head) {
+            node* temp = cb->head; 
+            cb->head = cb->head->next; 
+            free(temp);
+        }
+        close(cb->fd);
+        free(cb);
+        exit(1);
     }
 
     return 0;
